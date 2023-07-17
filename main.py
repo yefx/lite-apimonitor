@@ -38,17 +38,33 @@ def get_current_time():
 # 定义异步监控函数
 async def monitor(session, task):
     # 解构任务
-    name, method, url, headers, params, timeout, status_code, interval, keyword = task
+    name, method, url, headers, params, timeout, status_code, interval, keyword, login = task
     try:
         # 输出任务信息
         logging.info(f"执行任务: {name}, URL: {url}, headers: {headers}, params: {params}")
+
+        if login:
+            # 获取认证信息
+            auth_info = get_auth_info_from_database(name)
+            if auth_info is not None:
+                login_url, login_method, login_headers, login_params = auth_info
+                # 认证步骤
+                if login_method.lower() == 'get':
+                    login_response = await session.get(login_url, headers=json.loads(login_headers), params=json.loads(login_params))
+                else:
+                    login_response = await session.post(login_url, headers=json.loads(login_headers), data=json.loads(login_params))
+                token = await login_response.text()  # 假设token是响应的整个内容，你可能需要根据实际情况解析响应
+
+                # 在headers中添加token
+                headers = json.loads(headers)
+                headers['Authorization'] = f'Bearer {token}'
+
         # 根据请求方法执行请求
         if method.lower() == 'get':
-            response = await session.get(url, headers=json.loads(headers), params=json.loads(params), timeout=timeout)
+            response = await session.get(url, headers=headers, params=json.loads(params), timeout=timeout)
         else:
-            response = await session.post(url, headers=json.loads(headers), data=json.loads(params), timeout=timeout)
+            response = await session.post(url, headers=headers, data=json.loads(params), timeout=timeout)
         text = await response.text()
-        # print(f"接口 {name} 监控告警. HTTP状态码正常值 {status_code}  实际响应 {text}")
         # 判断响应状态和关键词
         if response.status != status_code or keyword not in text:
             # 构造告警信息
@@ -58,11 +74,31 @@ async def monitor(session, task):
             logging.error(f"警告-响应错误\n\n时间： {now_time}\n\n监控: {name}\n\n正常值：{status_code}-{keyword}\n\n响应状态码：{response.status}\n\n响应信息: {text}\n\n")
     except Exception as e:
         # 发送异常信息
-        # print(f"接口监控: {name} 链接错误: {str(e)}")
         now_time = get_current_time()
         msg = f"警告-响应错误\n\n时间： {now_time}\n\n监控: {name}\n\n正常值：{status_code}-{keyword}\n\n响应信息: {str(e)}\n\n"
         send_dingbot(msg)
         logging.error(msg)
+
+
+def get_auth_info_from_database(task_name):
+    try:
+        # 连接到 SQLite 数据库
+        conn = sqlite3.connect(DATAFILE_PATH)
+        cursor = conn.cursor()
+
+        # 从 auth_info 表获取认证信息
+        cursor.execute(
+            'SELECT login_url, login_method, login_headers, login_params FROM auth_info WHERE task_name = ?',
+            (task_name,)
+        )
+        auth_info = cursor.fetchone()
+        cursor.close()
+        conn.close()
+    except sqlite3.OperationalError as e:
+        print(f"数据库操作错误: {str(e)}")
+        return None  # 返回None, 因为无法获取认证信息
+
+    return auth_info
 
 # 从数据库中获取任务
 def get_tasks_from_database():

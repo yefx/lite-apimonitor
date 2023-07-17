@@ -12,6 +12,7 @@ class Task(BaseModel):
     status_code: int
     interval: int
     keyword: str
+    login: bool
 
 # 定义数据库连接池
 class DB:
@@ -24,7 +25,15 @@ class DB:
                     timeout INTEGER,
                     status_code INTEGER,
                     interval INTEGER,
-                    keyword TEXT
+                    keyword TEXT,
+                    login BOOLEAN
+                )
+            ''')
+            # 创建存储登录信息的表
+            cursor.execute('''CREATE TABLE IF NOT EXISTS auth_info (task_name TEXT PRIMARY KEY,login_url TEXT,login_method TEXT,
+                    login_headers TEXT,
+                    login_params TEXT,
+                    auth_flag BOOLEAN
                 )
             ''')
 
@@ -42,22 +51,22 @@ db = DB('apimonitor.db')
 @app.post("/tasks/")
 async def create_task(task: Task):
     with db as cursor:
-        cursor.execute('''INSERT INTO tasks(name, method, url, headers, params, timeout, status_code, interval, keyword)
-                          VALUES(:name,:method,:url,:headers,:params,:timeout,:status_code,:interval,:keyword)''',
+        cursor.execute('''INSERT INTO tasks(name, method, url, headers, params, timeout, status_code, interval, keyword, login)
+                          VALUES(:name,:method,:url,:headers,:params,:timeout,:status_code,:interval,:keyword,:login)''',
                        task.dict())
     return {**task.dict(), 'message': 'Task created'}
 
 @app.get("/tasks/")
 async def read_tasks():
     with db as cursor:
-        cursor.execute('SELECT name, method, url, headers, params, timeout, status_code, interval, keyword FROM tasks')
+        cursor.execute('SELECT name, method, url, headers, params, timeout, status_code, interval, keyword, login FROM tasks')
         tasks = cursor.fetchall()
     return {'tasks': tasks}
 
 @app.get("/tasks/{task_name}")
 async def read_task(task_name: str):
     with db as cursor:
-        cursor.execute('SELECT name, method, url, headers, params, timeout, status_code, interval, keyword FROM tasks WHERE name=?', (task_name,))
+        cursor.execute('SELECT name, method, url, headers, params, timeout, status_code, interval, keyword, login FROM tasks WHERE name=?', (task_name,))
         task = cursor.fetchone()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -67,7 +76,7 @@ async def read_task(task_name: str):
 async def update_task(task_name: str, task: Task):
     with db as cursor:
         cursor.execute('''UPDATE tasks SET method=:method, url=:url, headers=:headers, params=:params, 
-                          timeout=:timeout, status_code=:status_code, interval=:interval, keyword=:keyword WHERE name=:name''',
+                          timeout=:timeout, status_code=:status_code, interval=:interval, keyword=:keyword, login=:login WHERE name=:name''',
                        task.dict())
     return {'message': 'Task updated'}
 
