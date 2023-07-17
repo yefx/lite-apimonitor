@@ -40,6 +40,8 @@
 安装好所有依赖后，使用以下命令即可运行：
 
 ```bash
+#依赖
+pip install -r requirements.txt
 #启动 web_api 
 #启动前请确保main.py 与 monitor_api.py 中sqlite文件为同一个
 python monitor_api.py

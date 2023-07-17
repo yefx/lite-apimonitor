@@ -1,0 +1,6 @@
+aiohttp==3.8.4
+APScheduler==3.7.0
+DingtalkChatbot==1.5.7
+fastapi==0.100.0
+pydantic==1.10.7
+uvicorn==0.23.0
