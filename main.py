@@ -13,8 +13,7 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s [%(levelname)s] %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
 
-#数据库sqlite文件
-DATAFILE_PATH = 'apimonitor.db'
+
 # 初始化钉钉机器人
 ding_bot = DingtalkChatbot(
     'https://oapi.dingtalk.com/robot/send?access_token=xxxx')
@@ -35,35 +34,80 @@ def get_current_time():
 
     return formatted_time
 
+def find_token(d, key):
+    if key in d:
+        return d[key]
+    for k in d:
+        if isinstance(d[k], list):
+            for i in d[k]:
+                if isinstance(i, dict):
+                    if find_token(i, key) is not None:
+                        return find_token(i, key)
+        elif isinstance(d[k], dict):
+            if find_token(d[k], key) is not None:
+                return find_token(d[k], key)
+    return None
+
 # 定义异步监控函数
 async def monitor(session, task):
     # 解构任务
-    name, method, url, headers, params, timeout, status_code, interval, keyword, login = task
+    name, method, url, headers, params, timeout, status_code, interval, keyword, login, login_name = task
     try:
         # 输出任务信息
         logging.info(f"执行任务: {name}, URL: {url}, headers: {headers}, params: {params}")
 
+        if headers is None or headers == '':
+            headers = {}
+        else:
+            try:
+                headers = json.loads(headers)
+            except json.JSONDecodeError:
+                headers = {}
+
+        if params is None or params == '':
+            params = {}
+        else:
+            try:
+                params = json.loads(params)
+            except json.JSONDecodeError:
+                params = {}
+
         if login:
             # 获取认证信息
-            auth_info = get_auth_info_from_database(name)
+            auth_info = get_auth_info_from_database(login_name)
             if auth_info is not None:
                 login_url, login_method, login_headers, login_params = auth_info
+                if login_headers is None or login_headers == '':
+                    login_headers = {}
+                else:
+                    try:
+                        login_headers = json.loads(login_headers)
+                    except json.JSONDecodeError:
+                        login_headers = {}
+
+                if login_params is None or login_params == '':
+                    login_params = {}
+                else:
+                    try:
+                        login_params = json.loads(login_params)
+                    except json.JSONDecodeError:
+                        login_params = {}
                 # 认证步骤
                 if login_method.lower() == 'get':
-                    login_response = await session.get(login_url, headers=json.loads(login_headers), params=json.loads(login_params))
+                    login_response = await session.get(login_url, headers=login_headers, params=login_params)
                 else:
-                    login_response = await session.post(login_url, headers=json.loads(login_headers), data=json.loads(login_params))
-                token = await login_response.text()  # 假设token是响应的整个内容，你可能需要根据实际情况解析响应
-
+                    login_response = await session.post(login_url, headers=login_headers, data=login_params)
+                login_response_text = await login_response.text()
+                response_data = json.loads(login_response_text)
+                token = find_token(response_data, 'token')
                 # 在headers中添加token
-                headers = json.loads(headers)
                 headers['Authorization'] = f'Bearer {token}'
 
         # 根据请求方法执行请求
         if method.lower() == 'get':
-            response = await session.get(url, headers=headers, params=json.loads(params), timeout=timeout)
+            response = await session.get(url, headers=headers, params=params, timeout=timeout)
         else:
-            response = await session.post(url, headers=headers, data=json.loads(params), timeout=timeout)
+            response = await session.post(url, headers=headers, data=params, timeout=timeout)
         text = await response.text()
         # 判断响应状态和关键词
         if response.status != status_code or keyword not in text:
@@ -71,8 +115,8 @@ async def monitor(session, task):
             now_time = get_current_time()
             msg = f"警告-响应错误\n\n时间： {now_time}\n\n监控: {name}\n\n正常值：{status_code}-{keyword}\n\n响应状态码：{response.status}\n\n响应信息: {text}\n\n"
             send_dingbot(msg)
-            logging.error(f"警告-响应错误\n\n时间： {now_time}\n\n监控: {name}\n\n正常值：{status_code}-{keyword}\n\n响应状态码：{response.status}\n\n响应信息: {text}\n\n")
-    except Exception as e:
+            logging.error(f"警告-响应错误 时间： {now_time} 监控: {name} 正常值：{status_code}-{keyword} 响应状态码：{response.status} 响应信息: {text}\n")
+    except aiohttp.ClientError as e:
         # 发送异常信息
         now_time = get_current_time()
         msg = f"警告-响应错误\n\n时间： {now_time}\n\n监控: {name}\n\n正常值：{status_code}-{keyword}\n\n响应信息: {str(e)}\n\n"
@@ -95,7 +139,7 @@ def get_auth_info_from_database(task_name):
         cursor.close()
         conn.close()
     except sqlite3.OperationalError as e:
-        print(f"数据库操作错误: {str(e)}")
+        logging.error(f"数据库操作错误: {str(e)}")
         return None  # 返回None, 因为无法获取认证信息
 
     return auth_info
@@ -103,27 +147,32 @@ def get_auth_info_from_database(task_name):
 # 从数据库中获取任务
 def get_tasks_from_database():
     try:
-        # 连接到 SQLite 数据库
-        conn = sqlite3.connect(DATAFILE_PATH)
-        cursor = conn.cursor()
-
-        # 判断 tasks 表是否存在
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks';")
-        if cursor.fetchone() is None:
-            raise sqlite3.OperationalError("数据库中'tasks'表不存在,或者未添加任务监控程序不执行")
-
-        # 从 tasks 表获取任务数据
-        cursor.execute(
-            'SELECT name, method, url, headers, params, timeout, status_code, interval, keyword FROM tasks'
-        )
+        cursor.execute("""
+            SELECT name, method, url, headers, params, timeout, status_code, interval, keyword, login, login_name
+            FROM tasks""")
         tasks = cursor.fetchall()
-        cursor.close()
-        conn.close()
-    except sqlite3.OperationalError as e:
-        print(f"数据库操作错误: {str(e)}")
-        return []  # 返回空列表, 因为无法获取任务
+    except sqlite3.OperationalError:
+        logging.error(f"数据库操作错误: {str(e)}")
+        return {}
 
-    return tasks  # 正常返回任务列表
+    # 使用列表裹字典推导式优化处理 headers 和 params 的逻辑
+    tasks = {
+        task_name: {
+            'method': method,
+            'url': url,
+            'headers': json.loads(headers) if headers else {},
+            'params': json.loads(params) if params else {},
+            'timeout': timeout,
+            'status_code': status_code,
+            'interval': interval,
+            'keyword': keyword,
+            'login': login,
+            'login_name': login_name if login_name else ''
+        }
+        for task_name, method, url, headers, params, timeout, status_code, interval, keyword, login, login_name in tasks
+    }
+
+    return tasks
 
 async def update_tasks(session, scheduler):
     # 获取新的任务列表
@@ -142,6 +191,46 @@ async def update_tasks(session, scheduler):
         if name not in current_job_ids:
             scheduler.add_job(monitor, 'interval', args=(session, task), seconds=interval, id=name)
 
+def get_tasks_from_database():
+    try:
+        # 判断 tasks 表是否存在
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks';")
+        if cursor.fetchone() is None:
+            raise sqlite3.OperationalError("数据库中'tasks'表不存在,或者未添加任务监控程序不执行")
+
+        # 从 tasks 表获取任务数据
+        cursor.execute(
+            'SELECT name, method, url, headers, params, timeout, status_code, interval, keyword, login, login_name FROM tasks'
+        )
+        tasks = cursor.fetchall()
+    except sqlite3.OperationalError as e:
+        print(f"数据库操作错误: {str(e)}")
+        return {}  # 返回空字典, 因为无法获取任务
+
+    # 解析 headers 和 params
+    for task in tasks:
+        task = list(task)  # 将元组转换为列表
+        if task[3] is None or task[3] == '':
+            task[3] = {}  # headers
+        else:
+            try:
+                task[3] = json.loads(task[3])
+            except json.JSONDecodeError:
+                task[3] = {}
+        if task[4] is None or task[4] == '':
+            task[4] = {}
+        else:
+            try:
+                task[4] = json.loads(task[4])
+            except json.JSONDecodeError:
+                task[4] = {}
+        if task[10] is None:
+            task[10] = ''
+        task = tuple(task)
+
+    return {task[0]: task for task in tasks}
+
+
 async def main():
     # 初始化调度器
     scheduler = AsyncIOScheduler()
@@ -149,9 +238,9 @@ async def main():
     async with aiohttp.ClientSession() as session:
         # 获取任务
         tasks = get_tasks_from_database()
-        for task in tasks:
+        for name, task in tasks.items():
             # 解构任务
-            name, _, _, _, _, _, _, interval, _ = task
+            _, _, _, _, _, _, _, interval, _, _, _ = task
             # 添加任务到调度器
             scheduler.add_job(monitor, 'interval', args=(session, task), seconds=interval, id=name)
         # 启动调度器
@@ -160,36 +249,31 @@ async def main():
         # 主循环
         while True:
             # 每分钟检查一次数据库
-            await asyncio.sleep(10)
+            await asyncio.sleep(60)
             new_tasks = get_tasks_from_database()
-            new_task_names = {task[0] for task in new_tasks}
-            old_task_names = {task[0] for task in tasks}
 
             # 查找新任务和被删除的任务
-            added_tasks = [task for task in new_tasks if task[0] not in old_task_names]
-            removed_tasks = [task for task in tasks if task[0] not in new_task_names]
+            added_tasks = {name: task for name, task in new_tasks.items() if name not in tasks}
+            removed_tasks = {name: task for name, task in tasks.items() if name not in new_tasks}
 
             # 处理被删除的任务
-            for task in removed_tasks:
-                scheduler.remove_job(task[0])
+            for name in removed_tasks:
+                scheduler.remove_job(name)
 
-            # 处理新任务
-            for task in added_tasks:
-                name, _, _, _, _, _, _, interval, _ = task
+            # 处理新任务和被更新的任务
+            for name, task in added_tasks.items():
+                _, _, _, _, _, _, _, interval, _, _, _ = task
                 scheduler.add_job(monitor, 'interval', args=(session, task), seconds=interval, id=name)
-
-            # 查找被更新的任务
-            for new_task in new_tasks:
-                for old_task in tasks:
-                    if new_task[0] == old_task[0] and new_task != old_task:
-                        # 任务被更新，先删除旧任务，再添加新任务
-                        scheduler.remove_job(old_task[0])
-                        name, _, _, _, _, _, _, interval, _ = new_task
-                        scheduler.add_job(monitor, 'interval', args=(session, new_task), seconds=interval, id=name)
 
             # 更新任务列表
             tasks = new_tasks
 
 # 主程序入口
 if __name__ == "__main__":
-    asyncio.run(main())
+    # 数据库sqlite文件
+    DATAFILE_PATH = 'apimonitor.db'
+    # 连接到 SQLite 数据库
+    with sqlite3.connect(DATAFILE_PATH) as conn:
+        cursor = conn.cursor()
+        asyncio.run(main())
+
