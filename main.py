@@ -48,6 +48,43 @@ def find_token(d, key):
                 return find_token(d[k], key)
     return None
 
+
+async def login_update_token(session, task):
+    # 此处填写登录逻辑
+    # 获取登录所需参数
+    auth_info = get_auth_info_from_database(task[-1])
+    if auth_info is not None:
+        login_url, login_method, login_headers, login_params = auth_info
+        if login_headers is None or login_headers == '':
+            login_headers = {}
+        else:
+            try:
+                login_headers = json.loads(login_headers)
+            except json.JSONDecodeError:
+                login_headers = {}
+
+        if login_params is None or login_params == '':
+            login_params = {}
+        else:
+            try:
+                login_params = json.loads(login_params)
+            except json.JSONDecodeError:
+                login_params = {}
+        # 认证步骤
+        if login_method.lower() == 'get':
+            login_response = await session.get(login_url, headers=login_headers, params=login_params)
+        else:
+            login_response = await session.post(login_url, headers=login_headers, data=login_params)
+        login_response_text = await login_response.text()
+        response_data = json.loads(login_response_text)
+        token = find_token(response_data, 'token')
+
+        # 返回更新后的 token
+        return token
+    else:
+        return None
+
+
 # 定义异步监控函数
 async def monitor(session, task):
     # 解构任务
@@ -73,35 +110,8 @@ async def monitor(session, task):
                 params = {}
 
         if login:
-            # 获取认证信息
-            auth_info = get_auth_info_from_database(login_name)
-            if auth_info is not None:
-                login_url, login_method, login_headers, login_params = auth_info
-                if login_headers is None or login_headers == '':
-                    login_headers = {}
-                else:
-                    try:
-                        login_headers = json.loads(login_headers)
-                    except json.JSONDecodeError:
-                        login_headers = {}
-
-                if login_params is None or login_params == '':
-                    login_params = {}
-                else:
-                    try:
-                        login_params = json.loads(login_params)
-                    except json.JSONDecodeError:
-                        login_params = {}
-                # 认证步骤
-                if login_method.lower() == 'get':
-                    login_response = await session.get(login_url, headers=login_headers, params=login_params)
-                else:
-                    login_response = await session.post(login_url, headers=login_headers, data=login_params)
-                login_response_text = await login_response.text()
-                response_data = json.loads(login_response_text)
-                token = find_token(response_data, 'token')
-                # 在headers中添加token
-                headers['Authorization'] = f'Bearer {token}'
+            token = await login_update_token(session, task)
+            headers['Authorization'] = f'Bearer {token}'
 
         # 根据请求方法执行请求
         if method.lower() == 'get':
@@ -109,13 +119,28 @@ async def monitor(session, task):
         else:
             response = await session.post(url, headers=headers, data=params, timeout=timeout)
         text = await response.text()
+
+        json_data = json.loads(text)
+
+        # 检查是否因为 'token' 失效引起的 '401' 错误
+        if response.status == 401 and json_data.get('msg') == 'token 已失效!':
+            token = await login_update_token(session, task)
+            headers['Authorization'] = f'Bearer {token}'
+
+            # 再次尝试 API 请求
+            if method.lower() == 'get':
+                response = await session.get(url, headers=headers, params=params, timeout=timeout)
+            else:
+                response = await session.post(url, headers=headers, data=params, timeout=timeout)
+            text = await response.text()
+
         # 判断响应状态和关键词
         if response.status != status_code or keyword not in text:
-            # 构造告警信息
             now_time = get_current_time()
             msg = f"警告-响应错误\n\n时间： {now_time}\n\n监控: {name}\n\n正常值：{status_code}-{keyword}\n\n响应状态码：{response.status}\n\n响应信息: {text}\n\n"
             send_dingbot(msg)
-            logging.error(f"警告-响应错误 时间： {now_time} 监控: {name} 正常值：{status_code}-{keyword} 响应状态码：{response.status} 响应信息: {text}\n")
+            logging.error(
+                f"警告-响应错误 时间： {now_time} 监控: {name} 正常值：{status_code}-{keyword} 响应状态码：{response.status} 响应信息: {text}\n")
     except aiohttp.ClientError as e:
         # 发送异常信息
         now_time = get_current_time()
